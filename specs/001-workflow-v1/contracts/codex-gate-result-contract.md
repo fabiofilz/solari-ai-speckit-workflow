@@ -13,8 +13,9 @@ and it never stages, commits, merges, or tags regardless of its verdict.
 
 ## Required trailing block
 
-Codex's session output **MUST** end with a fenced block of exactly this
-shape:
+Codex's session output **MUST** end with a plain, **unfenced** block of
+exactly this shape (shown fenced here only for display; the actor MUST NOT
+wrap it in a ```` ``` ````/`~~~` fence, quote it, or indent it):
 
 ```
 RESULT: PASS|FAIL
@@ -36,6 +37,13 @@ FINDINGS:
 
 ## Parser behavior (fail-closed)
 
+- `RESULT:` and `FINDINGS:` are recognized only at column 0, outside any
+  blockquote and outside any fenced code block (backtick or tilde; a fence
+  closes only on a structurally valid closer at the same blockquote depth
+  with 0-3 spaces of indentation, the same fence character, and a run at
+  least as long as the opener; an unclosed fence runs to EOF). A block
+  placed inside a fence is therefore never authoritative and yields
+  **`FAIL`** — there is no prose or fenced fallback.
 - If the trailing block is **missing entirely**, malformed (doesn't match
   the shape above), or `RESULT:` is anything other than exactly `PASS` or
   `FAIL` → the gate outcome is **`FAIL`**. The runner never defaults an

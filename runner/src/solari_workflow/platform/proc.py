@@ -97,6 +97,7 @@ def run(
     cwd: str | os.PathLike[str] | None = None,
     env: dict[str, str] | None = None,
     check: bool = False,
+    input_text: str | None = None,
 ) -> ProcessResult:
     """Run `argv` (never through a shell) and capture stdout/stderr/exit/duration.
 
@@ -105,12 +106,19 @@ def run(
     by default (``check=False``) — callers decide whether it means
     PASS/FAIL. Pass ``check=True`` to instead raise :class:`CommandFailed`
     on a non-zero exit.
+
+    `input_text`, when given, is written to the subprocess's stdin (UTF-8
+    encoded) before it runs to completion - used by `git/ops.py`'s
+    `mktag` (B3/item-3 remediation: constructing a tag OBJECT via `git
+    mktag`'s own stdin-driven format, entirely independent of any ref, so
+    it can be fully verified before any ref ever makes it visible).
     """
     start = time.monotonic()
     completed = subprocess.run(  # noqa: S603 - list-argv only, never shell=True
         list(argv),
         cwd=cwd,
         env=env,
+        input=input_text.encode("utf-8") if input_text is not None else None,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         shell=False,
@@ -133,6 +141,7 @@ def run_streaming(
     cwd: str | os.PathLike[str] | None = None,
     env: dict[str, str] | None = None,
     echo: bool = True,
+    input_text: str | None = None,
 ) -> ProcessResult:
     """Run a long-running session (`claude`/`codex`), streaming its output.
 
@@ -141,12 +150,23 @@ def run_streaming(
     is simultaneously (a) echoed to the operator's terminal when ``echo``
     is true, and (b) accumulated into the returned :class:`ProcessResult`
     for `.ai-runs/*-result.md` transcript persistence (research.md §6/§8).
+
+    ``input_text``, when given, is written to the subprocess's stdin (UTF-8
+    encoded) and the stream is then closed — this is how `actors/claude.py`
+    and `actors/codex.py` (T033/T035) hand a prompt body to the `claude`/
+    `codex` CLI, both of which document reading their initial instructions
+    from stdin when no positional prompt argument is given. The write
+    happens from the main thread only *after* the stdout/stderr reader
+    threads are already running, so a subprocess that begins producing
+    output before stdin is fully consumed can never deadlock against an
+    unread pipe buffer on either side.
     """
     start = time.monotonic()
     process = subprocess.Popen(  # noqa: S603 - list-argv only, never shell=True
         list(argv),
         cwd=cwd,
         env=env,
+        stdin=subprocess.PIPE if input_text is not None else None,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         shell=False,
@@ -174,6 +194,15 @@ def run_streaming(
     )
     stdout_thread.start()
     stderr_thread.start()
+
+    if input_text is not None:
+        assert process.stdin is not None
+        try:
+            process.stdin.write(input_text.encode("utf-8", errors="replace"))
+        except BrokenPipeError:
+            pass  # the process exited/closed stdin before consuming it - not our error to raise
+        finally:
+            process.stdin.close()
 
     returncode = process.wait()
     stdout_thread.join()

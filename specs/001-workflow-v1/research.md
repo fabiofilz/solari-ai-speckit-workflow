@@ -996,7 +996,7 @@ the read-only gate contract beyond the CLI's own behavior:
    reported. This makes the read-only contract technically checked, not
    merely requested in the prompt.
 2. **Structured result contract**: the prompt given to Codex requires it to
-   end its output with a fenced marker the runner can parse
+   end its output with an unfenced, column-0 marker block the runner can parse
    deterministically (see `contracts/codex-gate-result-contract.md`):
    ```
    RESULT: PASS|FAIL

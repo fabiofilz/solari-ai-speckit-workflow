@@ -71,7 +71,9 @@ def test_no_subcommand_at_all_fails_rather_than_hanging() -> None:
 
 
 def test_unimplemented_subcommand_reports_actionable_error_and_manual_intervention_exit_code() -> None:
-    result = _run_cli("status")
+    # `retention` (US5/T064-T066) is the one subcommand still unimplemented
+    # after T033-T050 - `status` (T050) has a real handler now.
+    result = _run_cli("retention")
     assert result.returncode == 2
     assert "later phase" in result.stderr.lower()
 

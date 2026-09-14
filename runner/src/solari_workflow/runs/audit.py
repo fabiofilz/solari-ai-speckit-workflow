@@ -12,6 +12,8 @@ creates a brand-new numbered pair.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -114,6 +116,66 @@ def write_result(record: RunRecordPaths, content: str) -> Path:
             f"result already recorded at {record.result_path}; the audit trail is immutable"
         ) from exc
     return record.result_path
+
+
+class StructuredEvidenceError(Exception):
+    """A structured evidence file is missing, unreadable, malformed, or
+    does not match the digest its referrer recorded for it."""
+
+
+_EVIDENCE_NAME_RE = re.compile(r"^\d{8}-\d{3}-[A-Za-z0-9._-]+-[a-z-]+\.json$")
+
+
+def write_structured_evidence(record: RunRecordPaths, *, kind: str, payload: dict) -> tuple[str, str]:
+    """Create an immutable, machine-readable JSON evidence file paired with
+    `record` (`<stem>-<kind>.json`), via the same `O_EXCL` never-overwrite
+    primitive as the prompt/result pair.
+
+    The payload is serialized canonically (`sort_keys`, compact
+    separators) so its SHA-256 digest is deterministic. Returns
+    `(filename, sha256_hex)`; a referrer (e.g. `BlockState`) stores both,
+    so a later reader can prove it is looking at exactly the bytes that
+    were written, not a similar-looking replacement.
+    """
+    if not re.fullmatch(r"[a-z-]+", kind):
+        raise ValueError(f"invalid evidence kind {kind!r}")
+    text = json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+    path = record.prompt_path.parent / f"{record.stem}-{kind}.json"
+    try:
+        _create_exclusive(path, text)
+    except FileExistsError as exc:
+        raise ResultAlreadyRecordedError(
+            f"structured evidence already recorded at {path}; the audit trail is immutable"
+        ) from exc
+    return path.name, hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def read_structured_evidence(ai_runs_dir: Path, filename: str, expected_sha256: str) -> dict:
+    """Read and verify a structured evidence file written by
+    :func:`write_structured_evidence`. Fails closed
+    (:class:`StructuredEvidenceError`) if the name is not a plain
+    evidence filename (no path separators/traversal), the file is
+    missing, its digest does not match `expected_sha256`, or it is not a
+    JSON object."""
+    if not _EVIDENCE_NAME_RE.fullmatch(filename):
+        raise StructuredEvidenceError(f"invalid structured evidence filename {filename!r}")
+    path = ai_runs_dir / filename
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise StructuredEvidenceError(f"could not read structured evidence {path}: {exc}") from exc
+    actual = hashlib.sha256(raw).hexdigest()
+    if actual != expected_sha256:
+        raise StructuredEvidenceError(
+            f"structured evidence {path} digest {actual} does not match the recorded digest {expected_sha256}"
+        )
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise StructuredEvidenceError(f"structured evidence {path} is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise StructuredEvidenceError(f"structured evidence {path} must contain a JSON object")
+    return data
 
 
 def render_metadata_header(

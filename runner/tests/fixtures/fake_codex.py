@@ -38,6 +38,18 @@ import sys
 
 TRANSIENT_FAILURE_EXIT_CODE = 17
 
+# A canned `--help` response naming every flag/subcommand
+# `actors/codex.py`'s `_build_codex_argv`/`verify_codex_capabilities`
+# (T035) either uses or checks for - `--help` always takes priority over
+# every other knob (including a simulated transient failure), matching
+# `fake_claude.py`'s own rationale exactly.
+_HELP_TEXT = """Usage: codex exec [OPTIONS] [PROMPT]
+  exec              Run Codex non-interactively
+  -s, --sandbox <SANDBOX_MODE>   [read-only, workspace-write, danger-full-access]
+  -c, --config <key=value>       Override a configuration value
+  -m, --model <MODEL>            Model the agent should use
+"""
+
 
 def _render_findings(raw: str) -> str:
     if not raw:
@@ -54,6 +66,10 @@ def _render_findings(raw: str) -> str:
 
 
 def main() -> int:
+    if "--help" in sys.argv[1:]:
+        print(_HELP_TEXT)
+        return 0
+
     if os.environ.get("FAKE_CODEX_TRANSIENT_FAILURE") == "1":
         print("fake_codex: simulated transient launch failure", file=sys.stderr)
         return TRANSIENT_FAILURE_EXIT_CODE

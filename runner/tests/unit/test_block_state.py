@@ -219,12 +219,11 @@ def test_from_dict_accepts_real_integer_retry_counts() -> None:
         assert from_dict(data).retry_count_current_stage == valid_value
 
 
-def test_write_block_state_overwrites_a_previous_record(tmp_path: Path) -> None:
+def test_direct_completed_write_without_publication_proof_is_not_authoritative(tmp_path: Path) -> None:
     write_block_state(tmp_path, BlockState(**_valid_kwargs(state="RUNNING")))
     write_block_state(tmp_path, BlockState(**_valid_kwargs(state="COMPLETED")))
-    loaded = load_block_state(tmp_path)
-    assert loaded is not None
-    assert loaded.state == "COMPLETED"
+    with pytest.raises(BlockStateError, match="no durable completion proof"):
+        load_block_state(tmp_path)
 
 
 # --- Regeneration from Git state (T022-T032 re-gate, Finding 2 — MAJOR) ----

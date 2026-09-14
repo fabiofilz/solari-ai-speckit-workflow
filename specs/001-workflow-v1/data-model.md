@@ -123,7 +123,7 @@ by the runner itself.
 | Field | Derived from |
 |---|---|
 | `first_task_id`, `last_task_id` | Orchestrator-selected task range (from `tasks.md`). |
-| `block_name` | Orchestrator-supplied free text. |
+| `block_name` | Orchestrator-supplied, validated at `start-block`: 1-80 ASCII letters/digits separated by single spaces, `-`, `_` or `.`, starting and ending with a letter or digit and containing a letter (no line breaks, control characters or `:` — it is rendered into line-oriented Git messages). |
 | `branch_name` | `T{first_task_id}-{PascalCase(block_name)}` (research.md §16). |
 | `task_ids` | Full list of task IDs in the range, for tag metadata (research.md §14). |
 

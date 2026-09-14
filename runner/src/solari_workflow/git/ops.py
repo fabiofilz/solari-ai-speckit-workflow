@@ -169,9 +169,63 @@ class GitRepo:
 
     path: Path
 
-    def _run(self, argv: list[str], *, env: dict[str, str] | None = None, check: bool = True) -> proc.ProcessResult:
+    def _run(
+        self,
+        argv: list[str],
+        *,
+        env: dict[str, str] | None = None,
+        check: bool = True,
+        input_text: str | None = None,
+    ) -> proc.ProcessResult:
+        """Run one `git` subcommand, with a single, narrowly-scoped retry
+        (research.md §0.6/A6): only an `OSError` raised by the subprocess
+        layer itself — the `git` process failing to even launch (e.g. a
+        transient fork/exec resource failure) — is retried, exactly once,
+        via `proc.run_with_single_retry`. By construction, a process that
+        never launched cannot have mutated anything, so this blind retry
+        is always safe regardless of which git subcommand it was; no
+        per-call-site "was it partially applied?" check is needed here.
+
+        A `git` process that DID launch and merely exited nonzero is
+        `CommandFailed`/plain nonzero data (`check=True`/`check=False`
+        respectively) — never an `OSError` — and is therefore NEVER
+        retried by this path: a merge conflict, a compare-and-swap
+        `update-ref` rejection, an ambiguous ref, or any other
+        structural/semantic Git failure stops immediately, exactly as
+        A6 requires ("structural/semantic/ambiguous Git failures stop
+        immediately... never introduce generic 'retry any Git failure'
+        behavior").
+
+        **Item 9 - this IS the complete safe set, not a placeholder.**
+        research.md §0.6's own retry table names exactly one pre-mutation
+        transient class: "claude/codex/git/uv failed to launch". No
+        OTHER post-launch Git failure can be classified as transient
+        without inspecting `stderr` TEXT for a specific cause (e.g. a
+        `.git/index.lock` contention message) — and per this remediation's
+        own explicit instruction, an unreliable, locale-sensitive stderr
+        heuristic is worse than not retrying at all (this codebase
+        already has one prior, hard-learned lesson about classifying Git
+        state from translatable stderr text — see `is_git_repository`'s
+        own docstring above). A nonzero exit is therefore always either
+        a legitimate negative answer (handled by the specific caller,
+        e.g. `branch_exists`'s exit-code table) or a structural failure
+        (`CommandFailed`) — never something this method itself reclassifies
+        as transient. This scope was deliberately re-examined for this
+        remediation and is unchanged: it is the complete answer, not an
+        interim one.
+        """
         executable = proc.resolve_executable(GIT_EXECUTABLE)
-        return proc.run([executable, *argv], cwd=self.path, env=env, check=check)
+        full_argv = [executable, *argv]
+
+        def _invoke() -> proc.ProcessResult:
+            try:
+                return proc.run(full_argv, cwd=self.path, env=env, check=check, input_text=input_text)
+            except OSError as exc:
+                raise proc.TransientOperationalError(
+                    f"failed to launch 'git {' '.join(argv)}': {exc}"
+                ) from exc
+
+        return proc.run_with_single_retry(_invoke)
 
     # --- Repository/state inspection -----------------------------------
 
@@ -179,7 +233,34 @@ class GitRepo:
         return self._run(["rev-parse", rev]).stdout.strip()
 
     def current_branch(self) -> str:
-        return self._run(["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
+        """The branch HEAD is attached to, read from the symbolic ref itself
+        (`git symbolic-ref --quiet HEAD` -> `refs/heads/<name>`), never via
+        `rev-parse --abbrev-ref`, whose output is disambiguated against
+        same-named tags (fourth remediation, B2). Detached HEAD -> "HEAD"."""
+        result = self._run(["symbolic-ref", "--quiet", "HEAD"], check=False)
+        if result.returncode == 1:
+            return "HEAD"
+        if result.returncode != 0:
+            raise GitAmbiguityError(
+                f"'git symbolic-ref HEAD' failed unexpectedly (exit {result.returncode}): {result.stderr.strip()}"
+            )
+        ref = result.stdout.strip()
+        if not ref.startswith("refs/heads/"):
+            raise GitAmbiguityError(f"HEAD points at non-branch ref {ref!r}")
+        return ref[len("refs/heads/") :]
+
+    def branch_oid(self, name: str) -> str:
+        """The commit OID of the BRANCH `name`, resolved only through the
+        explicit `refs/heads/<name>` ref - a tag or any other ref with the
+        same short name can never be selected (fourth remediation, B2).
+        A missing branch raises."""
+        result = self._run(
+            ["rev-parse", "--verify", "--quiet", "--end-of-options", f"refs/heads/{name}^{{commit}}"], check=False
+        )
+        oid = result.stdout.strip()
+        if result.returncode != 0 or not oid:
+            raise GitAmbiguityError(f"branch ref 'refs/heads/{name}' does not resolve to a commit")
+        return oid
 
     def branch_exists(self, name: str) -> bool:
         """`git rev-parse --verify --quiet refs/heads/<name>`.
@@ -247,6 +328,133 @@ class GitRepo:
             staged_paths=staged_paths,
         )
 
+    def diff_between(self, rev1: str, rev2: str) -> str:
+        """`git diff <rev1> <rev2>` — a plain-text diff between two
+        already-resolved Git revisions (commit-ish or tree-ish alike).
+
+        A2 remediation: Codex's review evidence is built by diffing
+        `HEAD` directly against Candidate Tree X's own `candidate_tree_oid`
+        (a real, content-addressed tree OBJECT — `git write-tree`'s
+        result), never against the live, mutable working directory. This
+        provably binds the evidence to the exact state a `run-codex-gate`
+        invocation already fingerprinted, and — unlike a working-tree
+        diff — covers everything the invariant chain requires:
+
+        - tracked modifications and deletions (an ordinary tree-to-tree
+          diff);
+        - new files, WITH their full content (a file present only in
+          `rev2`'s tree renders as a complete "new file" diff — unlike a
+          working-tree `git diff`, which never shows an untracked file at
+          all, a tree-to-tree diff has no "untracked" concept: every path
+          in either tree is a first-class, already-`add -A`'d entry);
+        - file mode changes (part of git's own tree-diff machinery);
+        - symlinks (a symlink is itself a blob — its target string — with
+          mode `120000`; a target change renders as an ordinary content
+          diff);
+        - binary files: reported explicitly as `Binary files a/... and
+          b/... differ` (git's own default, non-`--binary` behavior) —
+          an explicit acknowledgment that content was omitted, never a
+          silent gap.
+
+        Read-only; never touches the real index (diffing two revisions
+        needs no index write at all).
+        """
+        return self._run(["diff", rev1, rev2]).stdout
+
+    def diff_numstat(self, rev1: str, rev2: str) -> list[tuple[str | None, str | None, str]]:
+        """`git diff --numstat <rev1> <rev2>` — `(added, deleted, path)`
+        per changed path; `added`/`deleted` are `None` for a path git
+        itself reports as binary (numstat prints a literal `-\t-\t<path>`
+        for those — locale-independent, unlike parsing the human-readable
+        "Binary files ... differ" line, research.md's own prior lesson
+        about not classifying on translatable stderr/stdout text).
+
+        Used by item 5's binary-evidence construction to find exactly
+        which paths in :meth:`diff_between`'s plain-text output are
+        binary, so the caller can supplement them with deterministic
+        identity metadata (:meth:`ls_tree_entry`/:meth:`blob_size`)
+        instead of leaving a bare "Binary files differ" line as the only
+        evidence.
+        """
+        # Third remediation (M7): machine-safe form only. `--no-renames`
+        # disables rename detection (whatever the user's `diff.renames`
+        # config says), so a rename is always reported as a deletion of
+        # the old path plus an addition of the new one - never the
+        # human-form `old => new` / `{a => b}` display string, which is
+        # not a literal path. `-z` NUL-terminates each record so no path
+        # is ever quoted/escaped. `--no-textconv` keeps binary
+        # classification independent of any configured textconv driver.
+        result = self._run(["diff", "--numstat", "-z", "--no-renames", "--no-textconv", rev1, rev2])
+        entries: list[tuple[str | None, str | None, str]] = []
+        for record in result.stdout.split("\0"):
+            if not record:
+                continue
+            parts = record.split("\t", 2)
+            if len(parts) != 3:
+                raise GitAmbiguityError(f"unexpected 'git diff --numstat -z' record: {record!r}")
+            added_raw, deleted_raw, path = parts
+            added = None if added_raw == "-" else added_raw
+            deleted = None if deleted_raw == "-" else deleted_raw
+            entries.append((added, deleted, path))
+        return entries
+
+    def ls_tree_entries(self, tree_ish: str) -> dict[str, tuple[str, str, str]]:
+        """Every entry of `tree_ish`, recursively, as `{path: (mode, type,
+        oid)}` (`git ls-tree -r -z --full-tree`). NUL-delimited and
+        pathspec-free, so a path is always matched literally - never
+        quoted, and never interpreted as a glob pattern."""
+        result = self._run(["ls-tree", "-r", "-z", "--full-tree", tree_ish], check=False)
+        if not result.ok:
+            raise GitAmbiguityError(
+                f"'git ls-tree' failed unexpectedly (exit {result.returncode}) "
+                f"for {tree_ish!r}: {result.stderr.strip()}"
+            )
+        entries: dict[str, tuple[str, str, str]] = {}
+        for record in result.stdout.split("\0"):
+            if not record:
+                continue
+            meta, sep, path = record.partition("\t")
+            fields = meta.split()
+            if not sep or len(fields) != 3:
+                raise GitAmbiguityError(f"unexpected 'git ls-tree -z' record: {record!r}")
+            mode, obj_type, oid = fields
+            entries[path] = (mode, obj_type, oid)
+        return entries
+
+    def ls_tree_entry(self, tree_ish: str, path: str) -> tuple[str, str, str] | None:
+        """`(mode, type, oid)` for the literal `path` within `tree_ish`, or
+        `None` if `path` is absent from that tree."""
+        return self.ls_tree_entries(tree_ish).get(path)
+
+    def blob_size(self, oid: str) -> int:
+        """`git cat-file -s <oid>` — a blob's size in bytes, without ever
+        reading its content (safe for a binary file of unknown/large
+        size, per item 5's "do not dump arbitrary huge binary content")."""
+        result = self._run(["cat-file", "-s", oid], check=False)
+        if not result.ok:
+            raise GitAmbiguityError(
+                f"'git cat-file -s' failed unexpectedly (exit {result.returncode}) for {oid!r}: "
+                f"{result.stderr.strip()}"
+            )
+        return int(result.stdout.strip())
+
+    def untracked_files(self) -> list[str]:
+        """Paths not tracked by Git and not excluded by `.gitignore`
+        (`git ls-files --others --exclude-standard`) — a live working-
+        directory query, distinct from :meth:`diff_between`'s tree-object
+        comparison (kept as a general utility; `run-codex-gate`'s own
+        review-evidence construction no longer needs it now that a
+        tree-to-tree diff against Candidate Tree X already renders new
+        files with full content — see :meth:`diff_between`).
+        """
+        result = self._run(["ls-files", "--others", "--exclude-standard"], check=False)
+        if not result.ok:
+            raise GitAmbiguityError(
+                f"'git ls-files --others' failed unexpectedly (exit {result.returncode}): "
+                f"{result.stderr.strip()}"
+            )
+        return [line for line in result.stdout.splitlines() if line]
+
     def tracked_files_under(self, path: str) -> list[str]:
         """Tracked files under `path` (relative to the repo root), if any.
 
@@ -295,6 +503,55 @@ class GitRepo:
             f"for {path!r}: {result.stderr.strip()}"
         )
 
+    def tag_exists(self, name: str) -> bool:
+        """`git rev-parse --verify --quiet refs/tags/<name>` — the tag-ref
+        counterpart to :meth:`branch_exists`, used as a checkpoint-tag
+        collision preflight (B3/M2: check before mutating anything, not
+        after)."""
+        result = self._run(["rev-parse", "--verify", "--quiet", f"refs/tags/{name}"], check=False)
+        if result.returncode == 0:
+            return True
+        if result.returncode == 1:
+            return False
+        raise GitAmbiguityError(
+            f"'git rev-parse --verify' failed unexpectedly (exit {result.returncode}) "
+            f"while checking for tag {name!r}: {result.stderr.strip()}"
+        )
+
+    def parents_of(self, commit_ish: str) -> list[str]:
+        """The parent OIDs of `commit_ish`, in order (`git rev-list
+        --parents -n 1 <commit_ish>` — first token is `commit_ish` itself
+        resolved to a full OID, the rest are its parents in the order Git
+        recorded them). Used by the checkpoint merge-topology verification
+        (B3): parent count, parent identity, and parent ORDER are each
+        independently significant for an ordinary `git merge --no-ff`
+        (first parent is the branch that was checked out, i.e. `main`;
+        second is the branch that was merged in).
+        """
+        result = self._run(["rev-list", "--parents", "-n", "1", commit_ish], check=False)
+        if not result.ok:
+            raise GitAmbiguityError(
+                f"'git rev-list --parents' failed unexpectedly (exit {result.returncode}) "
+                f"for {commit_ish!r}: {result.stderr.strip()}"
+            )
+        tokens = result.stdout.split()
+        if not tokens:
+            raise GitAmbiguityError(f"'git rev-list --parents' returned no output for {commit_ish!r}")
+        return tokens[1:]
+
+    def object_type(self, oid: str) -> str:
+        """`git cat-file -t <oid>` — used to prove an annotated tag ref
+        really is a tag OBJECT (not a lightweight ref pointing directly at
+        a commit), per B3's "annotated tag target is the verified merge
+        commit" requirement."""
+        result = self._run(["cat-file", "-t", oid], check=False)
+        if not result.ok:
+            raise GitAmbiguityError(
+                f"'git cat-file -t' failed unexpectedly (exit {result.returncode}) "
+                f"for {oid!r}: {result.stderr.strip()}"
+            )
+        return result.stdout.strip()
+
     def merged_branches(self, target: str = "main") -> list[str]:
         result = self._run(["branch", "--merged", target])
         branches: list[str] = []
@@ -338,7 +595,62 @@ class GitRepo:
         self._run(argv)
 
     def tag_annotated(self, tag_name: str, message: str, target: str = "HEAD") -> None:
+        """`git tag -a <name> <target> -m <message>` - creates the tag
+        object AND publishes `refs/tags/<name>` in one atomic step. NOT
+        used by the checkpoint flow's own tag publication (B3/item 3
+        uses :meth:`mktag` + :meth:`update_ref` instead, precisely so the
+        object can be verified BEFORE anything makes it visible by name)
+        - kept as a general-purpose primitive for contexts where that
+        distinction does not matter.
+        """
         self._run(["tag", "-a", tag_name, target, "-m", message])
+
+    def delete_tag(self, tag_name: str) -> None:
+        """`git tag -d <name>` — a general-purpose primitive. Never used
+        to delete an already-published, permanent checkpoint tag
+        (research.md §13/constitution: checkpoint tags are never deleted
+        or rewritten once genuinely published)."""
+        self._run(["tag", "-d", tag_name])
+
+    def tagger_ident(self) -> str:
+        """`git var GIT_COMMITTER_IDENT` — the exact `"Name <email>
+        timestamp tz"` line format a tag object's own `tagger` field
+        requires (identical shape to a commit's `committer` line), read
+        from the same identity `git tag -a` itself would use. Used by
+        :meth:`mktag` to hand-construct a valid tag object via plumbing.
+        """
+        return self._run(["var", "GIT_COMMITTER_IDENT"]).stdout.strip()
+
+    def build_tag_payload(self, *, target: str, tag_name: str, message: str) -> str:
+        """The exact annotated-tag object payload `mktag` will write
+        (`object`/`type`/`tag`/`tagger` headers, blank line, message).
+        Built once, so the caller can later compare the object actually
+        stored under the returned OID against these exact bytes."""
+        tagger = self.tagger_ident()
+        return f"object {target}\ntype commit\ntag {tag_name}\ntagger {tagger}\n\n{message}"
+
+    def mktag(self, payload: str) -> str:
+        """`git mktag` — writes a validated annotated tag OBJECT from
+        `payload` to the object database and returns its OID, WITHOUT
+        creating or touching any ref. The returned object is unreferenced
+        and invisible by name until a separate, later
+        `update_ref(f"refs/tags/{name}", oid, "")` publishes it, so it
+        can be fully verified first (B3). Contrast with `tag_annotated`,
+        which creates the object AND the ref together."""
+        return self._run(["mktag"], input_text=payload).stdout.strip()
+
+    def read_tag_object(self, oid: str) -> str:
+        """`git cat-file tag <oid>` — the raw stored payload of the tag
+        object with exactly this OID (never resolved through a ref
+        name), so it can be compared byte-for-byte with the payload the
+        caller asked `mktag` to write."""
+        result = self._run(["cat-file", "tag", oid], check=False)
+        if not result.ok:
+            raise GitAmbiguityError(
+                f"'git cat-file tag' failed unexpectedly (exit {result.returncode}) for {oid!r}: "
+                f"{result.stderr.strip()}"
+            )
+        return result.stdout
 
     def update_ref(self, ref: str, new_oid: str, old_oid: str) -> None:
         """Compare-and-swap ref update — fails if `ref` isn't currently `old_oid`."""

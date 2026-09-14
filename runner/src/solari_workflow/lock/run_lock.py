@@ -106,6 +106,22 @@ def _format_contention_message(owner: LockPayload | None, note: str) -> str:
     )
 
 
+def peek_lock(ai_runs_dir: Path) -> LockPayload | None:
+    """Read-only inspection of whatever currently sits at `<ai_runs_dir>/.lock`,
+    without acquiring or releasing anything (`solari-workflow status`, T050 -
+    "never mutates anything"). Returns `None` both when no lock file exists
+    and when one exists but cannot be parsed (a status report has no
+    stronger claim to make about an unreadable payload than "no usable
+    lock information" - it never raises, since status must stay safe to
+    run regardless of state).
+    """
+    path = ai_runs_dir / LOCK_FILENAME
+    try:
+        return LockPayload.from_json(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
 @dataclass
 class RunLock:
     """A run lock scoped to one `.ai-runs/` directory.

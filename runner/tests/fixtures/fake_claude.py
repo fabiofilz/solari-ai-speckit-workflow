@@ -46,8 +46,28 @@ import sys
 
 TRANSIENT_FAILURE_EXIT_CODE = 17
 
+# A canned `--help` response naming every flag `actors/claude.py`'s
+# `_build_claude_argv`/`verify_claude_capabilities` (T033) either uses or
+# checks for - `--help` always takes priority over every other knob
+# (including a simulated transient failure) since a real `claude --help`
+# never launches an actual session and would never itself fail
+# operationally.
+_HELP_TEXT = """Usage: claude [options] [command] [prompt]
+  -p, --print                 Print response and exit
+  --model <model>              Model for the current session
+  --effort <level>              Effort level for the current session
+  -r, --resume [value]          Resume a conversation by session ID
+  --session-id <uuid>            Use a specific session ID
+  --disallowedTools, --disallowed-tools <tools...>  Tool names to deny
+  --append-system-prompt <prompt>  Append a system prompt
+"""
+
 
 def main() -> int:
+    if "--help" in sys.argv[1:]:
+        print(_HELP_TEXT)
+        return 0
+
     if os.environ.get("FAKE_CLAUDE_TRANSIENT_FAILURE") == "1":
         print("fake_claude: simulated transient launch failure", file=sys.stderr)
         return TRANSIENT_FAILURE_EXIT_CODE

@@ -291,9 +291,20 @@ checkpointed under this workflow.
 - Candidate Tree construction, validated-state fingerprinting, persistent
   block state, run locking, configuration handling, Git repository inspection,
   and foundational readiness behavior are implemented.
-- Production Claude/Codex actor invocation, the complete development-block
-  lifecycle, checkpoint commit/merge/tag automation, resume orchestration,
-  branch retention, and stack-specific readiness checks are not yet complete.
+- The full single-block lifecycle (T033–T050) is implemented and tested
+  end-to-end against fake `claude`/`codex` CLI stubs: `start-block`,
+  `run-claude`, `run-codex-gate`, `checkpoint` (commit-tree/update-ref +
+  `merge --no-ff` + annotated tag), `resume` (revalidation only — it never
+  auto-invokes the next stage itself, per Controlled Automation), and
+  `status`. The single-retry-then-`BLOCKED_MANUAL` policy is implemented at
+  the actor-invocation level (a `claude`/`codex` launch failure); it is not
+  yet implemented for a transient failure inside a Git operation itself
+  (`start-block`'s or `checkpoint`'s own Git calls), which remains a
+  documented gap rather than a silently assumed guarantee.
+- Concurrency enforcement (wiring the run lock into every subcommand's own
+  dispatch, User Story 3), stack-specific readiness checks (User Story 4),
+  and branch retention (User Story 5, `checkpoint`'s own retention call site
+  is left explicit and unfilled) are not yet implemented.
 - The current bootstrap implementation checkpoint predates the runner's own
   complete checkpoint lifecycle and is therefore recorded as an explicit
   bootstrap exception.

@@ -23,6 +23,16 @@ _VALID_PASCAL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*$")
 _BRANCH_RE = re.compile(r"^T(?P<first>\d+)-(?P<pascal>[A-Za-z][A-Za-z0-9]*)$")
 _CHECKPOINT_TAG_RE = re.compile(r"^checkpoint-T(?P<first>\d+)-T(?P<last>\d+)$")
 
+# Fourth remediation (B3): strict block-name grammar. ASCII letters and
+# digits, with single inner separators from {space, "-", "_", "."}; starts
+# and ends with a letter or digit; at most 80 characters; must contain a
+# letter (so the PascalCase branch segment is never the fallback). No line
+# breaks, control characters, tabs, ":" or any other character that could
+# become an extra line or a forged field in a Git message.
+BLOCK_NAME_MAX_LENGTH = 80
+_BLOCK_NAME_RE = re.compile(r"[A-Za-z0-9]+(?:[ ._-][A-Za-z0-9]+)*")
+_TASK_ID_RE = re.compile(r"[Tt]?[0-9]+")
+
 
 def task_id_number(task_id: str) -> str:
     """Normalize a task id like `"T091"` or `"091"` to its bare numeric suffix."""
@@ -71,6 +81,36 @@ def to_pascal_case(name: str, *, fallback_task_id: str) -> str:
 def to_slug(name: str) -> str:
     """Lower-cased, hyphen-joined slug sharing the PascalCase normalization pipeline."""
     return "-".join(word.lower() for word in normalize_words(name))
+
+
+def validate_block_name(block_name: str) -> str:
+    """Return `block_name` unchanged if it satisfies the strict grammar,
+    else raise `BlockIdentityInputError` (fourth remediation, B3)."""
+    from solari_workflow.errors import BlockIdentityInputError
+
+    if (
+        not isinstance(block_name, str)
+        or len(block_name) > BLOCK_NAME_MAX_LENGTH
+        or _BLOCK_NAME_RE.fullmatch(block_name) is None
+        or not any(ch.isalpha() for ch in block_name)
+    ):
+        raise BlockIdentityInputError(
+            f"invalid block name {block_name!r}: use 1-{BLOCK_NAME_MAX_LENGTH} ASCII letters/digits "
+            "separated by single spaces, '-', '_' or '.', starting and ending with a letter or digit "
+            "and containing at least one letter (no line breaks, control characters or ':')"
+        )
+    return block_name
+
+
+def validate_task_id(task_id: str) -> str:
+    """Return `task_id` unchanged if it is exactly `T<ASCII digits>` (or
+    bare digits), else raise `BlockIdentityInputError` - `int()` alone
+    would accept surrounding whitespace/newlines (fourth remediation, B3)."""
+    from solari_workflow.errors import BlockIdentityInputError
+
+    if not isinstance(task_id, str) or _TASK_ID_RE.fullmatch(task_id) is None:
+        raise BlockIdentityInputError(f"invalid task ID {task_id!r}: expected 'T' followed by ASCII digits")
+    return task_id
 
 
 def build_branch_name(first_task_id: str, block_name: str) -> str:

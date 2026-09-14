@@ -508,3 +508,64 @@ def test_add_all_stages_the_working_directory_into_the_targeted_index(tmp_path: 
     (tmp_path / "new_file.txt").write_text("new\n", encoding="utf-8")
     repo.add_all()
     assert "new_file.txt" in [name for _, name in repo.staged_name_status()]
+
+
+# --- A6: single-retry-on-launch-failure only, never on a structural failure ---
+
+
+def test_git_repo_run_retries_once_on_a_transient_launch_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _init_repo(tmp_path)
+    repo = ops.GitRepo(path=tmp_path)
+    original_run = proc_module.run
+    calls = {"n": 0}
+
+    def _flaky(argv, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("simulated: transient fork/exec failure")
+        return original_run(argv, **kwargs)
+
+    monkeypatch.setattr(proc_module, "run", _flaky)
+    result = repo.rev_parse("HEAD")
+    assert calls["n"] == 2
+    assert result  # a real OID was returned on the second attempt
+
+
+def test_git_repo_run_gives_up_after_a_second_consecutive_launch_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _init_repo(tmp_path)
+    repo = ops.GitRepo(path=tmp_path)
+    calls = {"n": 0}
+
+    def _always_fails(argv, **kwargs):
+        calls["n"] += 1
+        raise OSError("simulated: persistent launch failure")
+
+    monkeypatch.setattr(proc_module, "run", _always_fails)
+    with pytest.raises(proc_module.TransientOperationalError):
+        repo.rev_parse("HEAD")
+    assert calls["n"] == 2  # exactly one retry, then give up
+
+
+def test_git_repo_run_never_retries_a_structural_nonzero_exit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A `git` process that DID launch and merely exited nonzero (e.g. an
+    ambiguous ref, a merge conflict) is `CommandFailed`/plain data - never
+    an `OSError` - and must never be retried (A6: "structural/semantic/
+    ambiguous Git failures stop immediately... never introduce generic
+    'retry any Git failure' behavior")."""
+    _init_repo(tmp_path)
+    repo = ops.GitRepo(path=tmp_path)
+    calls = {"n": 0}
+
+    def _fails_structurally(argv, *, cwd=None, env=None, check=False, input_text=None):
+        calls["n"] += 1
+        result = proc_module.ProcessResult(returncode=128, stdout="", stderr="fatal: bad revision", duration=0.0)
+        if check:
+            raise proc_module.CommandFailed(argv, result)
+        return result
+
+    monkeypatch.setattr(proc_module, "run", _fails_structurally)
+    with pytest.raises(proc_module.CommandFailed):
+        repo.rev_parse("definitely-not-a-real-ref")
+    assert calls["n"] == 1  # never retried

@@ -61,6 +61,61 @@ class GitAmbiguityError(WorkflowError):
     """Unexpected Git state: wrong branch, merge conflict, ambiguous HEAD, etc."""
 
 
+class SpecKitFeatureAmbiguityError(WorkflowError):
+    """More than one Spec Kit feature directory under `[speckit].spec_dir`
+    has its own `tasks.md`, and no authoritative field exists anywhere in
+    the current config/state/contracts to say which one this block's
+    task IDs belong to (A5 remediation — the prior "pick the highest-
+    numbered directory" heuristic is removed; guessing risked silently
+    resolving a task ID against the wrong feature's `tasks.md`, corrupting
+    checkpoint tag metadata with another feature's task titles). Fails
+    closed rather than inventing a replacement heuristic.
+    """
+
+
+class SpecKitFeatureIdentityError(WorkflowError):
+    """A block's persisted Spec Kit feature identity (`BlockState.
+    tasks_md_path`, A5/item-7 remediation) fails an integrity check when
+    RE-resolved at a later command:
+
+    - the canonicalized (symlink-resolved) path escapes the project root
+      (traversal, or a symlink pointing outside the root);
+    - the file it names no longer exists, or no longer resolves to a
+      location under the project root;
+    - the feature identity recorded alongside a gate (`gate_feature_
+      identity`) no longer matches the block's own persisted identity
+      (item 8 - the composed Block/Gate Identity check).
+
+    Always fails closed - never silently falls back to `None`/"no
+    titles", since these are integrity violations, not an ordinary,
+    legitimate absence.
+    """
+
+
+class TaskRangeError(WorkflowError):
+    """An Orchestrator-supplied task range is not semantically ordered.
+
+    The Fingerprint model (`fingerprint/engine.py`) validates task-ID
+    *shape* (`T<digits>`) but intentionally does not own semantic
+    ordering (T022-T032's own design boundary). The lifecycle layer that
+    owns an Orchestrator-supplied `--first-task`/`--last-task` pair
+    (`start-block`, T037) is what must enforce `first_task <= last_task`
+    — never inferred or silently reordered.
+    """
+
+
+class BlockIdentityInputError(WorkflowError):
+    """An Orchestrator-supplied block identity value (block name or task
+    ID) does not satisfy its strict grammar (fourth remediation, B3).
+
+    Identity values are interpolated into line-oriented Git commit, merge
+    and tag messages; anything capable of becoming an additional message
+    line (line breaks, control characters) or of forging a message field
+    (`:`) is refused when the identity is first accepted, never escaped
+    later.
+    """
+
+
 class StagingPreconditionError(GitAmbiguityError):
     """The real index has staged content unrelated to the workflow (research.md §0.8).
 
